@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -15,8 +16,14 @@ import (
 	"github.com/vmihailenco/msgpack/v5"
 )
 
+type Entry struct {
+	Value    string
+	CreateAt time.Time
+	TTL      time.Duration
+}
+
 var (
-	dataMap = make(map[string]string)
+	dataMap = make(map[string]Entry)
 	rwm     = sync.RWMutex{}
 	wg      = sync.WaitGroup{}
 )
@@ -47,7 +54,16 @@ func load(file *os.File) error {
 	if len(fileRead) == 0 {
 		return nil
 	}
-	return msgpack.Unmarshal(fileRead, &dataMap)
+	err = msgpack.Unmarshal(fileRead, &dataMap)
+	if err != nil {
+		return err
+	}
+	for key, value := range dataMap {
+		if value.TTL > 0 && time.Since(value.CreateAt) > value.TTL {
+			delete(dataMap, key)
+		}
+	}
+	return nil
 }
 
 func handleConn(conn net.Conn) {
@@ -58,17 +74,26 @@ func handleConn(conn net.Conn) {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, " ", 3)
+		parts := strings.SplitN(line, " ", 4)
 		cmd := strings.ToUpper(parts[0])
 
 		switch cmd {
 		case "SET":
 			if len(parts) < 3 {
-				fmt.Fprintln(conn, "ERR usage: SET key value")
+				fmt.Fprintln(conn, "ERR usage: SET key value TTL")
 				continue
 			}
+			ttl := time.Duration(0)
+			if len(parts) == 4 {
+				seconds, err := strconv.Atoi(parts[3])
+				if err != nil {
+					fmt.Fprintln(conn, "ERR invalid TTL")
+					continue
+				}
+				ttl = time.Duration(seconds) * time.Second
+			}
 			rwm.Lock()
-			dataMap[parts[1]] = parts[2]
+			dataMap[parts[1]] = Entry{parts[2], time.Now(), ttl}
 			rwm.Unlock()
 			fmt.Fprintln(conn, "OK")
 		case "GET":
@@ -81,8 +106,13 @@ func handleConn(conn net.Conn) {
 			rwm.RUnlock()
 			if !ok {
 				fmt.Fprintln(conn, "nil")
+			} else if value.TTL > 0 && time.Since(value.CreateAt) > value.TTL {
+				rwm.Lock()
+				delete(dataMap, parts[1])
+				rwm.Unlock()
+				fmt.Fprintln(conn, "nil")
 			} else {
-				fmt.Fprintln(conn, value)
+				fmt.Fprintln(conn, value.Value)
 			}
 		case "DEL":
 			if len(parts) < 2 {
@@ -111,7 +141,7 @@ func main() {
 		return
 	}
 	if dataMap == nil {
-		dataMap = make(map[string]string)
+		dataMap = make(map[string]Entry)
 	}
 
 	stopChan := make(chan struct{})
