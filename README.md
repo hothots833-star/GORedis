@@ -8,3 +8,4 @@ GORedis — lightweight in-memory key-value store inspired by Redis, written in 
 - Concurrent access with RWMutex
 - Multiple simultaneous connections
 - Graceful shutdown with data saving
+- TTL support with lazy expiration
